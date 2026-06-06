@@ -12,11 +12,19 @@ st.set_page_config(page_title="Kraljic Matrix Dashboard", layout="wide")
 @st.cache_data
 def load_data():
     # Load with specified delimiter
-    df = pd.read_csv('Merged dataset with Scores.csv', sep=';')
-    df['Order_Date'] = pd.to_datetime(df['Order_Date'])
-    df['Month'] = df['Order_Date'].dt.strftime('%Y-%m')
-    # Assuming Quarter is derived from the date
-    df['Quarter'] = df['Order_Date'].dt.to_period('Q').astype(str)
+    df = pd.read_csv('Merged dataset with Scores.csv', sep=';' , decimal=',')
+
+    df['Order Value USD'] = (
+        df['Order Value USD']
+        .astype(str)
+        .str.replace(' ', '', regex=False)
+        .str.replace(',', '.', regex=False)
+        .astype(float)
+    )  
+    df['Quarter'] = pd.PeriodIndex(
+    pd.to_datetime(df['Month']),
+    freq='Q'
+).astype(str)
     return df
 
 # 3. Main Application Logic
@@ -56,7 +64,7 @@ def main():
     # --- PREPROCESSING & AXES ---
     # Aggregate by Supplier
     agg_df = df_f.groupby('Supplier_ID').agg({
-        'Order_Value_USD': 'sum',
+        'Order Value USD': 'sum',
         'Performance_Quality_Score': 'mean',
         'Financial_Risk_Score_Quarterly': 'mean',
         'Nachhaltigkeitsscore': 'mean',
@@ -66,7 +74,7 @@ def main():
 
     # Normalization (0-100)
     scaler = MinMaxScaler(feature_range=(0, 100))
-    agg_df['Normalized_Spend'] = scaler.fit_transform(agg_df[['Order_Value_USD']])
+    agg_df['Normalized_Spend'] = scaler.fit_transform(agg_df[['Order Value USD']])
     
     # Weighted Risk Calculation
     risk_cols = ['Performance_Quality_Score', 'Financial_Risk_Score_Quarterly', 'Nachhaltigkeitsscore', 'Standards Risks_Score', 'Risikoscore Political']
