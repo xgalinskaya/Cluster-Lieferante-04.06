@@ -11,9 +11,7 @@ st.set_page_config(page_title="Kraljic Matrix Dashboard", layout="wide")
 # 2. Caching Data Loader
 @st.cache_data
 def load_data():
-    # Load with specified delimiter
-    df = pd.read_csv('Merged dataset with Scores.csv', sep=';' , decimal=',')
-
+    df = pd.read_csv('Merged dataset with Scores.csv', sep=';', decimal=',')
     df['Order Value USD'] = (
         df['Order Value USD']
         .astype(str)
@@ -21,48 +19,50 @@ def load_data():
         .str.replace(',', '.', regex=False)
         .astype(float)
     )  
-    df['Quarter'] = pd.PeriodIndex(
-    pd.to_datetime(df['Month']),
-    freq='Q'
-).astype(str)
+    df['Quarter'] = pd.PeriodIndex(pd.to_datetime(df['Month']), freq='Q').astype(str)
     return df
 
 # 3. Main Application Logic
 def main():
     st.title("Sustainable Supply Chain: Kraljic Matrix")
-    
     df = load_data()
+
+    # --- INITIALISIERUNG DER GRENZEN (Einmal pro Jahr / Initial) ---
+    if 'threshold_x' not in st.session_state or 'threshold_y' not in st.session_state:
+        # Initialer Lauf über den gesamten Datensatz zur Festlegung
+        scaler_init = MinMaxScaler(feature_range=(0, 100))
+        # Einfache Aggregation für die Initialisierung
+        init_df = df.groupby('Supplier_ID').agg({'Order Value USD': 'sum', 'Nachhaltigkeitsscore': 'mean'}).reset_index()
+        init_df['Normalized_Spend'] = scaler_init.fit_transform(init_df[['Order Value USD']])
+        
+        # KMeans für die Initialisierung (feste Trennung)
+        kmeans_init = KMeans(n_clusters=4, random_state=42, n_init=10).fit(init_df[['Normalized_Spend', 'Nachhaltigkeitsscore']])
+        st.session_state.threshold_x = kmeans_init.cluster_centers_[:, 0].mean()
+        st.session_state.threshold_y = kmeans_init.cluster_centers_[:, 1].mean()
+
+    # Sidebar für manuelle Neuberechnung der Grenzen
+    if st.sidebar.button("Grenzen neu berechnen (Reset)"):
+        del st.session_state.threshold_x
+        del st.session_state.threshold_y
+        st.rerun()
 
     # --- SIDEBAR INTERFACE ---
     st.sidebar.header("Risk Component Weights")
-    st.sidebar.markdown("**Weights must sum to 100%**")
-    
     w1 = st.sidebar.slider("Performance Quality", 0, 100, 20)
     w2 = st.sidebar.slider("Financial Risk", 0, 100, 20)
     w3 = st.sidebar.slider("Sustainability Score", 0, 100, 20)
     w4 = st.sidebar.slider("Standards Risk", 0, 100, 20)
     w5 = st.sidebar.slider("Political Risk", 0, 100, 20)
 
-    total = w1 + w2 + w3 + w4 + w5
-    if total != 100:
-        st.error(f"Error: Weights sum to {total}%. Please adjust them to equal exactly 100%.")
+    if (w1 + w2 + w3 + w4 + w5) != 100:
+        st.error("Weights must sum to 100%.")
         st.stop()
 
-    st.sidebar.header("Filters")
-    selected_months = st.sidebar.multiselect("Month", options=['All'] + sorted(df['Month'].unique().tolist()), default='All')
-    selected_quarters = st.sidebar.multiselect("Quarter", options=['All'] + sorted(df['Quarter'].unique().tolist()), default='All')
-    selected_cats = st.sidebar.multiselect("Product Category", options=df['Product_Category'].unique().tolist(), default=df['Product_Category'].unique().tolist())
-
     # --- FILTERING ---
-    df_f = df.copy()
-    if 'All' not in selected_months:
-        df_f = df_f[df_f['Month'].isin(selected_months)]
-    if 'All' not in selected_quarters:
-        df_f = df_f[df_f['Quarter'].isin(selected_quarters)]
-    df_f = df_f[df_f['Product_Category'].isin(selected_cats)]
+    selected_cats = st.sidebar.multiselect("Product Category", options=df['Product_Category'].unique(), default=df['Product_Category'].unique())
+    df_f = df[df['Product_Category'].isin(selected_cats)]
 
     # --- PREPROCESSING & AXES ---
-    # Aggregate by Supplier
     agg_df = df_f.groupby('Supplier_ID').agg({
         'Order Value USD': 'sum',
         'Performance_Quality_Score': 'mean',
@@ -72,43 +72,30 @@ def main():
         'Risikoscore Political': 'mean'
     }).reset_index()
 
-    # Normalization (0-100)
     scaler = MinMaxScaler(feature_range=(0, 100))
     agg_df['Normalized_Spend'] = scaler.fit_transform(agg_df[['Order Value USD']])
     
-    # Weighted Risk Calculation
     risk_cols = ['Performance_Quality_Score', 'Financial_Risk_Score_Quarterly', 'Nachhaltigkeitsscore', 'Standards Risks_Score', 'Risikoscore Political']
-    weights = np.array([w1, w2, w3, w4, w5]) / 100
-    agg_df['Weighted_Risk'] = (agg_df[risk_cols].values * weights).sum(axis=1) * 100
+    agg_df['Weighted_Risk'] = (agg_df[risk_cols].values * np.array([w1, w2, w3, w4, w5]) / 100).sum(axis=1) * 100
 
-    # --- K-MEANS CLUSTERING ---
-    kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
-    agg_df['Cluster_ID'] = kmeans.fit_predict(agg_df[['Normalized_Spend', 'Weighted_Risk']])
-    
-    # Quadrant Mapping
+    # --- QUARDRANT ZUWEISUNG (Feste Grenzen) ---
     def map_quadrant(row):
-        if row['Normalized_Spend'] > 50 and row['Weighted_Risk'] > 50: return "Strategic suppliers"
-        if row['Normalized_Spend'] > 50 and row['Weighted_Risk'] <= 50: return "Leverage suppliers"
-        if row['Normalized_Spend'] <= 50 and row['Weighted_Risk'] > 50: return "Bottleneck suppliers"
-        return "Non-Critical suppliers"
+        if row['Normalized_Spend'] > st.session_state.threshold_x and row['Weighted_Risk'] > st.session_state.threshold_y: return "Strategic"
+        if row['Normalized_Spend'] > st.session_state.threshold_x and row['Weighted_Risk'] <= st.session_state.threshold_y: return "Leverage"
+        if row['Normalized_Spend'] <= st.session_state.threshold_x and row['Weighted_Risk'] > st.session_state.threshold_y: return "Bottleneck"
+        return "Non-Critical"
 
     agg_df['Kraljic_Quadrant'] = agg_df.apply(map_quadrant, axis=1)
 
     # --- VISUALIZATION ---
-    color_map = {"Strategic suppliers": "red", "Leverage suppliers": "blue", "Bottleneck suppliers": "yellow", "Non-Critical suppliers": "green"}
+    st.write(f"Aktive Grenzwerte: X={st.session_state.threshold_x:.2f}, Y={st.session_state.threshold_y:.2f}")
     fig = px.scatter(agg_df, x="Normalized_Spend", y="Weighted_Risk", color="Kraljic_Quadrant", 
-                     color_discrete_map=color_map, hover_data=['Supplier_ID'], title="Kraljic Matrix")
-    fig.add_hline(y=50, line_dash="dash", line_color="gray")
-    fig.add_vline(x=50, line_dash="dash", line_color="gray")
+                     hover_data=['Supplier_ID'], title="Kraljic Matrix (Fixe Jahresgrenzen)")
+    
+    fig.add_hline(y=st.session_state.threshold_y, line_dash="dash", line_color="red")
+    fig.add_vline(x=st.session_state.threshold_x, line_dash="dash", line_color="red")
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- CENTROIDS & TABLE ---
-    st.subheader("Cluster Centroids & Logic")
-    centroids = pd.DataFrame(kmeans.cluster_centers_, columns=['Avg_Spend', 'Avg_Risk'])
-    st.write(centroids)
-    st.markdown("- **Strategic**: High spend, high risk. Require partnership.\n- **Leverage**: High spend, low risk. Competitive bidding.\n- **Bottleneck**: Low spend, high risk. Ensure continuity.\n- **Non-Critical**: Low spend, low risk. Streamline.")
-
-    st.subheader("Supplier Data")
     st.dataframe(agg_df)
 
 if __name__ == "__main__":
